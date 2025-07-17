@@ -4,6 +4,7 @@
 mod checkpoint;
 mod claude_binary;
 mod commands;
+mod logging;
 mod process;
 
 use checkpoint::state::CheckpointState;
@@ -42,13 +43,20 @@ use commands::storage::{
     storage_list_tables, storage_read_table, storage_update_row, storage_delete_row,
     storage_insert_row, storage_execute_sql, storage_reset_database,
 };
+use commands::logging::{
+    get_frontend_log_path, write_frontend_log,
+};
 use process::ProcessRegistryState;
 use std::sync::Mutex;
 use tauri::Manager;
 
 fn main() {
-    // Initialize logger
-    env_logger::init();
+    // Initialize file-based logger
+    if let Err(e) = logging::init_file_logging() {
+        eprintln!("Failed to initialize file logging: {}", e);
+        // Fallback to console logging
+        env_logger::init();
+    }
 
 
     tauri::Builder::default()
@@ -195,6 +203,10 @@ fn main() {
             commands::slash_commands::slash_command_get,
             commands::slash_commands::slash_command_save,
             commands::slash_commands::slash_command_delete,
+            
+            // Logging
+            get_frontend_log_path,
+            write_frontend_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

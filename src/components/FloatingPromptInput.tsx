@@ -20,6 +20,7 @@ import { SlashCommandPicker } from "./SlashCommandPicker";
 import { ImagePreview } from "./ImagePreview";
 import { type FileEntry, type SlashCommand } from "@/lib/api";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { log } from "@/lib/logger";
 
 interface FloatingPromptInputProps {
   /**
@@ -186,6 +187,8 @@ const FloatingPromptInputInner = (
   const [cursorPosition, setCursorPosition] = useState(0);
   const [embeddedImages, setEmbeddedImages] = useState<string[]>([]);
   const [dragActive, setDragActive] = useState(false);
+  const [isComposing, setIsComposing] = useState(false);
+  const [compositionEndTime, setCompositionEndTime] = useState<number>(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -393,6 +396,13 @@ const FloatingPromptInputInner = (
         finalPrompt = `${finalPrompt}.\n\n${thinkingMode.phrase}.`;
       }
       
+      log.info("Sending prompt", { 
+        model: selectedModel, 
+        promptLength: finalPrompt.length,
+        hasImages: embeddedImages.length > 0,
+        thinkingMode: selectedThinkingMode
+      });
+      
       onSend(finalPrompt, selectedModel);
       setPrompt("");
       setEmbeddedImages([]);
@@ -596,7 +606,26 @@ const FloatingPromptInputInner = (
     }, 0);
   };
 
+  const handleCompositionStart = () => {
+    log.debug('[IME] Composition started - input method activated');
+    setIsComposing(true);
+  };
+
+  const handleCompositionEnd = () => {
+    const now = Date.now();
+    log.debug('[IME] Composition ended - input method deactivated');
+    setIsComposing(false);
+    setCompositionEndTime(now);
+    
+    // Set a timeout to clear the composition end time after the cooldown period
+    setTimeout(() => {
+      setCompositionEndTime(0);
+    }, 200); // 200ms cooldown period
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    log.debug(`[IME] Key pressed: ${e.key}, shiftKey: ${e.shiftKey}, ctrlKey: ${e.ctrlKey}, metaKey: ${e.metaKey}, isExpanded: ${isExpanded}`);
+    
     if (showFilePicker && e.key === 'Escape') {
       e.preventDefault();
       setShowFilePicker(false);
@@ -611,7 +640,32 @@ const FloatingPromptInputInner = (
       return;
     }
 
-    if (e.key === "Enter" && !e.shiftKey && !isExpanded && !showFilePicker && !showSlashCommandPicker) {
+    // Handle Enter key for sending messages
+    const shouldSendMessage = 
+      e.key === "Enter" && 
+      !showFilePicker && 
+      !showSlashCommandPicker && 
+      (
+        // Compact mode: Enter without Shift
+        (!isExpanded && !e.shiftKey) ||
+        // Expanded mode: Ctrl+Enter or Cmd+Enter
+        (isExpanded && (e.ctrlKey || e.metaKey) && !e.shiftKey)
+      );
+
+    if (shouldSendMessage) {
+      // Check if the user is composing with an input method (like Chinese pinyin)
+      // Also check if we're in the cooldown period after composition ended
+      const now = Date.now();
+      const inCooldownPeriod = compositionEndTime > 0 && (now - compositionEndTime) < 200;
+      
+      log.debug(`[IME] Enter pressed for sending - isComposing: ${isComposing}, nativeEvent.isComposing: ${e.nativeEvent.isComposing}, inCooldownPeriod: ${inCooldownPeriod}, timeSinceCompositionEnd: ${compositionEndTime > 0 ? now - compositionEndTime : 'N/A'}ms, mode: ${isExpanded ? 'expanded' : 'compact'}`);
+      
+      if (e.nativeEvent.isComposing || isComposing || inCooldownPeriod) {
+        log.debug("[IME] Blocking message send due to input composition or cooldown period");
+        return; // Don't send the message, let the input method finish
+      }
+      
+      log.debug(`[IME] Sending message via ${isExpanded ? 'Ctrl/Cmd+Enter' : 'Enter'} key`);
       e.preventDefault();
       handleSend();
     }
@@ -758,6 +812,8 @@ const FloatingPromptInputInner = (
                 value={prompt}
                 onChange={handleTextChange}
                 onPaste={handlePaste}
+                onCompositionStart={handleCompositionStart}
+                onCompositionEnd={handleCompositionEnd}
                 placeholder="Type your prompt here..."
                 className="min-h-[200px] resize-none"
                 disabled={disabled}
@@ -845,18 +901,27 @@ const FloatingPromptInputInner = (
                   </div>
                 </div>
 
-                <Button
-                  onClick={handleSend}
-                  disabled={!prompt.trim() || disabled}
-                  size="default"
-                  className="min-w-[60px]"
-                >
-                  {isLoading ? (
-                    <div className="rotating-symbol text-primary-foreground" />
-                  ) : (
-                    <Send className="h-4 w-4" />
-                  )}
-                </Button>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        onClick={handleSend}
+                        disabled={!prompt.trim() || disabled}
+                        size="default"
+                        className="min-w-[60px]"
+                      >
+                        {isLoading ? (
+                          <div className="rotating-symbol text-primary-foreground" />
+                        ) : (
+                          <Send className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Send message (Ctrl+Enter)</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             </motion.div>
           </motion.div>
@@ -1001,6 +1066,8 @@ const FloatingPromptInputInner = (
                   onChange={handleTextChange}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
+                  onCompositionStart={handleCompositionStart}
+                  onCompositionEnd={handleCompositionEnd}
                   placeholder={dragActive ? "Drop images here..." : "Ask Claude anything..."}
                   disabled={disabled}
                   className={cn(
